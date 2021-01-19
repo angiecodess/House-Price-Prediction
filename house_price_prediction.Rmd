@@ -1,0 +1,311 @@
+---
+title: "Prediction"
+output: 
+    pdf_document
+---
+
+# Summary
+* The final model is $price^{1/3} \sim saledate + gba + grade + ayb + tot\_bathrm + fireplaces + extwall + age + yr\_rmdl + eyb + rooms + stories + kitchens$ where $tot\_bathrm$ is sum of $bathrm$ and 0.5*$hf\_bathrm$ and $age$ is $saledate$ minus $eyb$, $yr\_rmdl$, or $ayb$, whichever is the latest.
+
+
+## Preprocessing
+I changed some categorical variables with no order, that is heat, ac, stories, style, extwall, from type chr to type factor. For saledate, I kept only the year and converted the data to int. Since grade is ordinal, I associated the levels with numbers, with larger numbers representing better grades.
+
+### Missing Data
+* yr_rmdl: I replaced the missing data (NA) in yr_rmdl with eyb, which has no NA values.
+* stories: I replaced missing data (NA) with the number 2, matching what is indicated in style.
+
+### Transformation
+* price: response variate price raised to the power of 1/3
+
+### Added variables
+* age: saledate minus eyb, yr_rmdl, or ayb, whichever is the latest
+* tot_bathrm: bathrm + 0.5*hl_bathrm
+* rmdl: binary variable, 1 is the house was remodelled(if yr_rmdl is not NA), 0 if it wasn't
+
+## Model Building
+Stepwise regression with a $AIC$-value of 29823.78.
+
+Main function used: `step` function
+
+<!-- Details -->
+<!-- R code starts, please present both code and output. -->
+<!-- Provide descriptions and explanations to justify your operations -->
+<!-- Be brief and to the point. -->
+<!-- Only details lead to your final model are needed. If you tried other appoaches/models, you can mention them, no details needed for abandoned attempts. -->
+
+# 1. Preprocessing
+
+## 1.1 Loading data
+```{r,echo=TRUE}
+load("final.Rdata")
+```
+
+
+## 1.2 Dealing with NA values
+### yr_rmdl
+```{r}
+NA1 <- which(colSums(is.na(dtrain)) > 0)
+sort(colSums(sapply(dtrain[NA1], is.na)), decreasing = TRUE)
+
+NA2 = which(colSums(is.na(dtest)) > 0)
+sort(colSums(sapply(dtest[NA2], is.na)), decreasing = TRUE)
+
+nrow(subset(dtrain, eyb>yr_rmdl))
+nrow(subset(dtrain, eyb<yr_rmdl))
+nrow(subset(dtrain, eyb==yr_rmdl))
+nrow(subset(dtrain, is.na(yr_rmdl)))
+
+dtrain$rmdl = ifelse(is.na(dtrain$yr_rmdl), 0, 1)
+
+for (i in 1:nrow(dtrain)){
+  if(is.na(dtrain$yr_rmdl[i])){
+    dtrain$yr_rmdl[i] = as.integer(dtrain$eyb[i]) 
+  }
+}
+```
+We see that both dtrain and dtest have NA values in yr_rmdl and stories. I investigated more and found that a large majorityof  observations have eyb values that are lower than yr_rmdl, specifically 712 out of 1303. The second most common values for yr_rmdl is NA, which I interpret as no remodelling done. Thus, I chose to set all NA values in yr_rmdl to the last time an improvement was done to the house, which is eyb. Based on the data, we see that most houses that were sold with high prices were remodelled, so I created a new variable rmdl to indicate whether the house was remodelled before replacing the NA values.
+
+### stories
+```{r}
+dtrain[which(is.na(dtrain$stories)),]
+dtest[which(is.na(dtest$stories)),]
+dtrain[which(is.na(dtrain$stories)), "stories"] = as.numeric(2)
+```
+Observe that all house with NA values in stories in both datasets have the style "2 story", so I replaced the NA values with the number 2.
+
+
+## 1.3 Label encoding/Factoring categorical variables
+### heat, ac, style, extwall, grade, saledate
+```{r}
+dtrain$heat = as.factor(dtrain$heat)
+
+dtrain$ac = ifelse(dtrain$ac == "Y", 1, 0)
+
+dtrain$style = as.factor(dtrain$style)
+
+Qualities = c('Low Quality', 'Fair Quality', 'Average', 'Above Average', 'Good Quality', 'Very Good', 'Superior')
+
+dtrain$grade = as.factor(dtrain$grade)
+
+dtrain$grade = as.numeric(factor(dtrain$grade,levels=Qualities)) - 1
+
+dtrain$extwall = as.factor(dtrain$extwall)
+
+dtrain$saledate = as.integer(format(as.Date(dtrain$sale,format="%Y-%m-%d"),"%Y"))
+```
+I factorized heat, style, and extwall, and changed "Y" in to 1 and "N" to 0 in ac. Since grade is ordinal, I assigned numerical values to the levels of grade with the highest grade being matched with the largest number. I also extracted the year in saledate and changed the type to number in preparation for the calculation of age later on.
+
+## 1.4 New variables
+### age, tot_bathrm
+```{r}
+age = c()
+
+for (i in 1:nrow(dtrain)){
+  if (dtrain$yr_rmdl[i]>=dtrain$eyb[i]){
+    if(dtrain$saledate[i] >= dtrain$yr_rmdl[i]){
+      age = c(age,dtrain$saledate[i]-dtrain$yr_rmdl[i])
+    } else if (dtrain$saledate[i]>=dtrain$eyb[i]){
+      age = c(age,dtrain$saledate[i]-dtrain$eyb[i])
+    } else {
+      age = c(age,dtrain$saledate[i]-dtrain$ayb[i])
+    }
+  } else {
+    if(dtrain$saledate[i] >= dtrain$eyb[i]){
+      age = c(age,dtrain$saledate[i]-dtrain$eyb[i])
+    } else if (dtrain$saledate[i]>=dtrain$yr_rmdl[i]){
+      age = c(age,dtrain$saledate[i]-dtrain$yr_rmdl[i])
+    } else {
+      age = c(age,dtrain$saledate[i]-dtrain$ayb[i])
+    }
+  }
+}
+
+dtrain$age = age
+dtrain$tot_bathrm = dtrain$bathrm + (dtrain$hf_bathrm*0.5)
+```
+Since yr_rmdl, ayb, eyb, and saledate by themselves don't really mean much, I created a new variable age that calculates the age of the house by subtracting the largest value among yr_rmdl, ayb, and eyb from saledate. Similarly, I added another variable tot_bathrm, which combines bathrm and hf_bathrm, with hf_bathrm subjecting to a factor of 0.5 as it is not the same as a full bathrm.
+
+## 1.5 Removing levels with few or no observations in train or test
+### extwall
+```{r}
+tapply(dtrain$extwall,dtrain$extwall,length)
+
+tapply(dtest$extwall,dtest$extwall,length)
+
+dtrain = dtrain[!(dtrain$extwall=="Adobe"),]
+dtrain = dtrain[!(dtrain$extwall=="Stone/Stucco"),]
+dtrain = dtrain[!(dtrain$extwall=="Stucco Block"),]
+dtrain = dtrain[!(dtrain$extwall=="Concrete Block"),]
+```
+I removed levels of extwall with very few observations in both datasets since it will not help with the prediction.
+
+### style
+```{r}
+tapply(dtrain$style,dtrain$style,length)
+tapply(dtest$style,dtest$style,length)
+
+dtrain = dtrain[!(dtrain$style=="4 Story"),]
+dtrain = dtrain[!(dtrain$style=="Bi-Level"),]
+```
+I removed levels of style with very few observations in both datasets since it will not help with the prediction.
+
+
+### heat
+```{r}
+tapply(dtrain$heat,dtrain$heat,length)
+tapply(dtest$heat,dtest$heat,length)
+
+dtrain = dtrain[!(dtrain$heat=="Air Exchng"),]
+dtrain = dtrain[!(dtrain$heat=="Gravity Furnac"),]
+dtrain = dtrain[!(dtrain$heat=="Wall Furnace"),]
+dtrain = dtrain[!(dtrain$heat=="Water Base Brd"),]
+dtrain[dtrain$heat == "No Data",]
+dtrain = dtrain[!(dtrain$heat=="No Data"),]
+```
+I removed levels of heat with very few observations in both datasets. I also noticed one observation with missing data in many columns, and thus I removed it.
+
+# 2. Visualization of important variables
+## Correlations
+```{r}
+library(corrplot)
+
+numeric_vars = which(sapply(dtrain, is.numeric)) 
+
+dtrain_numvar = dtrain[, numeric_vars]
+cor_numvar = cor(dtrain_numvar, use="pairwise.complete.obs")
+
+corrplot(cor_numvar, method="square",tl.col="black", tl.pos = "lt",tl.cex = 0.7,cl.cex = .7)
+```
+As expected, there is strong negative correlation between age and price. bathrm, rooms, bedrooms, yr_rmdl, saledate, gba, grade, and tot_bathrm have strong positive correlations with price. We will use this knowledge to inspect our model later.
+
+# 3. Model Specification
+## 3.1 Automated method
+```{r}
+null = lm(price~1, data=dtrain)
+fullmodel = lm(price~., data=dtrain)
+
+step(null,scope = list(upper=fullmodel),direction="both",trace=0)
+# Step:  AIC=29823.78
+model = lm(price ~ saledate + gba + grade + ayb + tot_bathrm + fireplaces + extwall + age + yr_rmdl + eyb + rooms + stories + kitchens, data=dtrain)
+
+# step(fullmodel, scope = list(lower=null),direction="backward",trace=0)
+# Step:  AIC=29825.44
+# model = price ~ bathrm + hf_bathrm + rooms + ayb + yr_rmdl + eyb + stories + saledate + gba + grade + extwall + kitchens + fireplaces + age, data=dtrain)
+```
+Stepwise regression and forward selection gave the same models and AIC values. However, backward selection gave a different model with a higher AIC, thus I will choose the first model.
+
+The AIC for the exhaustive model generated using regsubsets function in the package leaps is much larger than the others, so I will keep the model obtained from stepwise regression.
+
+# 4. Outliers
+## 4.1 rooms
+```{r}
+plot(dtrain$price, dtrain$rooms, type="n")
+text(dtrain$price, dtrain$rooms)
+tapply(dtrain$rooms,dtrain$rooms,length)
+tapply(dtest$rooms,dtest$rooms,length)
+
+dtrain = dtrain[!(dtrain$rooms=="19"),]
+dtrain = dtrain[!(dtrain$rooms=="14"),]
+```
+We see that there are very few houses with 14 or 19 rooms, and the max number of rooms among the data in dtest is 13, so we will remove the 3 rows with the most rooms.
+
+## 4.2 price
+```{r}
+sort(dtrain$price, decreasing=T)[1]
+sort(dtrain$price, decreasing=T)[2]
+sort(dtrain$price, decreasing=T)[3]
+sort(dtrain$price, decreasing=T)[4]
+
+dtrain = dtrain[!(dtrain$price == "2246100"),]
+dtrain = dtrain[!(dtrain$price == "1466800"),]
+
+model = lm(price ~ saledate + gba + grade + ayb + tot_bathrm + fireplaces + extwall + age + yr_rmdl + eyb + rooms + stories + kitchens, data=dtrain)
+```
+We see that the differences between 1st, 2nd largest price and the others are very big, so the observations with the 2 largest prices are removed.
+
+# 5. Assumptions for Linear Regression Model
+## E(ei) = 0, Normality, constant variance
+```{r}
+# residual vs. fitted
+plot(fitted(model),rstudent(model))
+
+# Cook's distance
+plot(model,which=5)
+
+# QQ-plot
+qqnorm(rstudent(model))
+qqline(rstudent(model))
+```
+di vs ${\hat{y}}$ shows a pattern, so I will investigate later. All points have a cook's distance below 1. The residuals seem to follow standard normal.
+
+# 6. Influential points
+## Checking hii and |di|
+```{r}
+hatm = hatvalues(model)
+hatv = as.data.frame(hatm)
+mean = 2*(19 + 1)/1303
+hatv$warn = ifelse(hatv[,'hatm']>mean, '>', '-')
+bighatv = subset(hatv, warn==">")
+
+resm = rstudent(model)
+resv = as.data.frame(resm)
+cutoff = 2.5
+resv$warn = ifelse(abs(resv[,'resm'])>cutoff, '>','-')
+bigresv = subset(resv, warn==">")
+
+bighatv
+bigresv
+
+dtrain = dtrain[-c(147,471,780),]
+dtrain = dtrain[!(dtrain$age < 0),]
+```
+Observations 147, 471, 780 have large hii and rstudent values, thus they are influential points. There are also a few observations with negative age, so I will remove those as well.
+
+# 7. Transformation
+## Boxcox
+```{r}
+library(MASS)
+
+model = lm(price ~ saledate + gba + grade + ayb + tot_bathrm + fireplaces + extwall + age + yr_rmdl + eyb + rooms + stories + kitchens, data=dtrain)
+AIC(model)
+summary(model)$adj.r.squared
+
+boxcox(model,lambda = seq(-1,1,1/20))
+
+model = lm((price^(1/3)) ~ saledate + gba + grade + ayb + tot_bathrm + fireplaces + extwall + age + yr_rmdl + eyb + rooms + stories + kitchens, data=dtrain)
+AIC(model)
+summary(model)$adj.r.squared
+```
+Since the 95% confidence interval of ${\lambda}$ does not contain "nice" or common values, I will use the MLE, which is 1/3. The new model gives a higher adjusted r-squared value. 
+
+## Back to checking the 3 assumptions
+```{r}
+# residual vs. fitted
+plot(fitted(model),rstudent(model))
+abline(h=c(-2,2),lty=2)
+
+# Cook's distance
+plot(model,which=5)
+
+# QQ-plot
+qqnorm(rstudent(model))
+qqline(rstudent(model))
+```
+After the transformation, di vs ${\hat{y}}$ doesn't show an obvious pattern. All points have a cook's distance below 1. The residuals seem to follow standard normal. All assumptions are met.
+
+## avPlots
+```{r}
+library(car)
+avPlots(model)
+
+model2 = lm((price^(1/3)) ~ saledate + gba + grade + ayb + tot_bathrm + fireplaces + extwall + age + yr_rmdl + eyb + stories + kitchens, data=dtrain)
+
+summary(model)$adj.r.squared
+summary(model2)$adj.r.squared
+AIC(model)
+AIC(model2)
+```
+The plots suggested linear relationships in all plots, except rooms, which has a weak linear relationship with price, so let's try a model without rooms. That gives a higher AIC and lower adjusted r-squared, so I will retain the old model.
+
+The final model is $price^{1/3} \sim saledate + gba + grade + ayb + tot\_bathrm + fireplaces + extwall + age + yr\_rmdl + eyb + rooms + stories + kitchens$.
